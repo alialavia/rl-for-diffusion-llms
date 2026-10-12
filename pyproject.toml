@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "espo"
+version = "0.1.0"
+description = "ESPO: ELBO-based Sequence-level Policy Optimization for diffusion LLMs (arXiv:2512.03759)"
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.4",
+  # LLaDA / Dream remote modeling code is written for transformers 4.x
+  "transformers>=4.46,<5",
+  "peft>=0.14",
+  "datasets>=2.20,<4",
+  "pyyaml",
+]
+
+[project.optional-dependencies]
+math = ["math-verify"]
+wandb = ["wandb"]
+test = ["pytest", "hypothesis>=6.100"]
+
+[tool.setuptools]
+packages = ["espo"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
