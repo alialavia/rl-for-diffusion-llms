@@ -1,0 +1,19 @@
+name: properties
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: Install (CPU torch)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[test]"
+      - name: Property tests
+        env: { HYPOTHESIS_PROFILE: ci }
+        run: pytest -q
+      - name: Mutation testing (every injected bug must be caught)
+        run: python scripts/mutation_test.py
