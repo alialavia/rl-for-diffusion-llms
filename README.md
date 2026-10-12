@@ -1,145 +1,196 @@
-# ESPO — RL for diffusion LLMs, from a sequence-level perspective
+# ESPO: reinforcement learning for diffusion LLMs
 
-A from-scratch PyTorch implementation of **ELBO-based Sequence-level Policy Optimization**
-([Ou et al., 2025, arXiv:2512.03759](https://arxiv.org/abs/2512.03759)) for masked
-diffusion LLMs (LLaDA-8B-Instruct, Dream-7B-Instruct). It is tested with **property-based
-testing** following [`alialavia/pbt-skills`](https://github.com/alialavia/pbt-skills).
+A PyTorch implementation of **ESPO** (ELBO-based Sequence-level Policy Optimization,
+[Ou et al., 2025](https://arxiv.org/abs/2512.03759)). ESPO fine-tunes masked diffusion
+language models such as LLaDA-8B with RL on tasks that have checkable answers: Sudoku,
+Countdown, GSM8K and MATH.
 
-* `PROPERTIES.md` holds the specification: every property, its oracle and the bugs it
-  catches. It was written before any implementation code.
-* `tests/` holds the Hypothesis property tests (each docstring cites its property ID).
-* `scripts/mutation_test.py` checks that the suite catches 22 injected plausible bugs.
+Diffusion LLMs don't produce text left to right, so they have no per-token probabilities
+for GRPO-style training. ESPO treats each whole answer as one action instead, and uses the
+model's ELBO (a lower bound on log-likelihood) as a stand-in for the answer's log-probability.
 
-## The method
+The code was written spec-first with property-based testing
+([`alialavia/pbt-skills`](https://github.com/alialavia/pbt-skills)). See [Testing](#testing).
 
-For each prompt, sample `G` completions with the diffusion sampler. Then each completion
-is treated as **one action**:
+> **Status.** All tests pass on CPU. The full training command has also run end to end on a
+> tiny LLaDA with 2 processes. It has **not yet been run on GPUs or with the real 8B
+> weights**, so do the [preflight](#2-preflight-1020-min) before starting a long run.
 
-| Piece | Formula | Code |
-|---|---|---|
-| Likelihood proxy | coupled MC ELBO, `l ~ U{0..L}`, weights `(L+1)/l` and `(L+1)/(L−l)` (Eq. 32–34) | `espo/elbo.py` |
-| Variance reduction | same masks for θ, θ_old and ref (antithetic); complementary masks (coupled); `l` stratified over the batch | `espo/elbo.py`, `espo/trainer.py` |
-| Ratio | `ρ = exp((L_θ − L_old)/L)` (Eq. 8) | `espo/objective.py` |
-| Objective | `min(ρÂ, clip(ρ,1±ε)Â) − β·½(L_θ − L_ref)²/L` (Eq. 7, 10) | `espo/objective.py` |
-| Advantage | group leave-one-out (released code) or group mean (paper) | `espo/objective.py` |
-| Rollouts | LLaDA low-confidence remasking, semi-AR blocks of 32, T = 0.9 | `espo/sampler.py` |
-| Loop | µ = 8 optimizer steps per rollout batch, fresh masks per step | `espo/trainer.py` |
+## Quickstart (one node, 8×H100)
 
-## Install
+**Requirements:** 8 GPUs with 80 GB each, Python ≥ 3.10, and about 20 GB of disk for the
+LLaDA weights, which download automatically from the Hugging Face Hub.
+
+### 1. Install
 
 ```bash
-pip install -e ".[test,math]"    # torch>=2.4, transformers 4.x, peft, datasets
+pip install torch --index-url https://download.pytorch.org/whl/cu124   # any CUDA build of torch >= 2.4
+pip install -e ".[test,math]"
 ```
 
-LLaDA/Dream ship remote modeling code written for transformers 4.x and do not load
-under transformers 5.
+Exact `transformers` and `peft` versions are pinned on purpose. LLaDA's model code does not
+load under transformers 5.
 
-## Train on one node with 8×H100
+### 2. Preflight (10–20 min)
+
+```bash
+scripts/smoke_8xh100.sh sudoku_llada
+```
+
+This runs 16 training steps with the real model and the full batch size, and fails fast if
+something is wrong. Afterwards, check peak GPU memory and timings:
+
+```bash
+tail -1 outputs/smoke_sudoku_llada/metrics.jsonl    # see max_mem_gb, time_generate, time_rollout
+```
+
+### 3. Train
 
 ```bash
 scripts/train_8xh100.sh sudoku_llada
 ```
 
-This runs `torchrun --standalone --nproc_per_node=8 -m espo.train --config configs/sudoku_llada.yaml`.
-Other configs: `countdown_llada`, `gsm8k_llada`, `math_llada`, `sudoku_dream`.
-Override any value with dotted keys:
+| Config | Task | Steps | Rough time |
+|---|---|---|---|
+| `sudoku_llada` | 4×4 Sudoku | 10k | ~1 day |
+| `countdown_llada` | Countdown (3 numbers) | 10k | ~1 day |
+| `gsm8k_llada` | GSM8K | 3k | — |
+| `math_llada` | MATH | 3k | — |
+| `sudoku_dream` | Sudoku on Dream-7B (experimental, never run) | 8k | — |
+
+Times are back-of-envelope estimates, not measurements.
+
+Results go to `outputs/<config>/`:
+* `metrics.jsonl` has one line per step: reward, KL, clip fraction, gradient norm, memory and timings.
+* `completions.jsonl` has sample generations.
+* `checkpoint-N/` has the LoRA adapter plus optimizer state.
+
+### 4. Evaluate
+
+The authors' test sets:
+
+```bash
+curl -LO https://raw.githubusercontent.com/ML-GSAI/ESPO/main/dataset/4x4_test_sudoku.csv
+curl -LO https://raw.githubusercontent.com/ML-GSAI/ESPO/main/dataset/countdown_cd3_test.jsonl
+
+scripts/eval_8xh100.sh sudoku outputs/sudoku_llada/checkpoint-10000 --test_file 4x4_test_sudoku.csv
+scripts/eval_8xh100.sh countdown outputs/countdown_llada/checkpoint-10000 --test_file countdown_cd3_test.jsonl
+```
+
+This prints one JSON line per generation length (128, 256, 512), for example
+`{"task": "sudoku", "gen_length": 256, "mean_reward": …, "solved": …, "n": 500}`.
+Compare with Table 1 of the paper as follows:
+* Sudoku: compare `mean_reward`, which is the fraction of empty cells filled correctly.
+* All other tasks: compare `solved`, the fraction fully correct.
+
+Leave out the checkpoint argument to evaluate the base model. GSM8K and MATH use their
+standard test splits and need no `--test_file`.
+
+## Configuration
+
+Every setting lives in `configs/<name>.yaml`. Override any of them from the command line
+with `section.key=value`:
 
 ```bash
 scripts/train_8xh100.sh countdown_llada train.max_steps=2000 espo.beta=0.005
 ```
 
-Default setup (paper Sec. 5.1 / App. E, authors' recipes):
+Useful overrides:
 
-* LoRA with r = 128 and α = 64 on bf16 LLaDA-8B-Instruct; one full replica per GPU under DDP.
-  The reference model is the base with adapters disabled, so it costs no extra memory.
-* Per optimizer step: 8 ranks × 2 prompts × G = 6 gives 96 completions (MATH: G = 16, 256 completions).
-* µ = 8, M = 2, coupled sampling, ε = 0.2, β = 0.01 (countdown 3e-3 with ε = 0, GSM8K/MATH 1e-3).
-* AdamW (0.9, 0.99), lr = 3e-6 constant with warmup, weight decay 0.01, gradient clipping 0.2.
-* Generation length 256 with blocks of 32. Diffusion steps: 128 for sudoku/countdown, 256 for math.
-* Run length: 10k steps (sudoku/countdown), 3k steps (GSM8K/MATH).
-
-Outputs go to `outputs/<config>/`:
-* `metrics.jsonl`: reward, KL, clip fraction, ratio range, grad norm and timings.
-* `completions.jsonl`: sample generations.
-* `checkpoint-N/`: LoRA adapter, optimizer and scheduler state.
-
-Resume with `train.resume_from=outputs/<config>/checkpoint-N`. Log to Weights & Biases with `train.wandb_project=espo`.
-
-Gradient checkpointing is on by default, because each micro-batch keeps M × 2 (coupled) forward passes for one backward. If you still hit OOM, lower `espo.micro_batch_size`.
-Gradients are accumulated exactly over micro-batches (property O10), so lowering it does not change the objective.
-
-Data:
-* Sudoku: synthetic 4×4 puzzles with unique solutions (properties D1–D3). You can also pass the d1 CSV with `train.train_file=4x4_sudoku_unique_puzzles.csv`.
-* Countdown: `Jiayi-Pan/Countdown-Tasks-3to4` (3 numbers), or `train.countdown_source=synthetic`.
-* GSM8K: `openai/gsm8k`.
-* MATH: `EleutherAI/hendrycks_math` for training, `HuggingFaceH4/MATH-500` for test.
-
-## Running on 8×H100: what is and isn't verified
-
-The code has **not** yet been run on GPUs or with the real 8B weights. What has been verified on CPU:
-* all properties in `PROPERTIES.md`;
-* the full `espo.train` CLI under `torchrun` with 2 DDP ranks, on a tiny randomly initialised LLaDA built from the official modeling code and tokenizer. This covers LoRA, the reference via disabled adapters, gradient checkpointing, the chat template, rewards and checkpoint save.
-
-Run the preflight first. It does 16 optimizer steps with the real model and the full batch, in about 10–20 minutes:
-
-```bash
-scripts/smoke_8xh100.sh sudoku_llada
-grep -o '"max_mem_gb": [0-9.]*' outputs/smoke_sudoku_llada/metrics.jsonl | tail -1
-```
-
-Things to check there:
-* **Peak memory.** This is estimated, not measured. If you OOM, lower `espo.micro_batch_size` (exact accumulation, property O10) or `espo.generation_batch_size`.
-* **Time.** Back-of-envelope: about 1–1.5 min per rollout phase (8 steps), so roughly a day for 10k steps. Generation dominates, as in the paper.
-* **Dream** (`sudoku_dream`) is experimental. Its attention-mask and logit-shift handling follow Dream's own generation code, but they have not been run.
-
-## Evaluate
-
-```bash
-scripts/eval_8xh100.sh sudoku outputs/sudoku_llada/checkpoint-10000 --test_file 4x4_test_sudoku.csv
-scripts/eval_8xh100.sh countdown outputs/countdown_llada/checkpoint-10000 --test_file countdown_cd3_test.jsonl
-```
-
-This uses greedy decoding at lengths 128, 256 and 512. Planning tasks unmask 2 tokens per step (App. E.1).
-For sudoku, `mean_reward` is cell accuracy. For the other tasks, read `solved`.
-The test files are the ones in the authors' repo (`dataset/`).
-
-## Tests
-
-```bash
-pytest                                   # ~1 min on CPU
-HYPOTHESIS_PROFILE=thorough pytest       # 500 examples per property
-python scripts/mutation_test.py          # every injected bug must be killed
-```
-
-| File | What it pins down |
+| Setting | What it does |
 |---|---|
-| `test_elbo_properties.py` | E[estimator] equals the exact `log p(y)` for consistent denoisers, and the brute-force any-order-AR likelihood for arbitrary ones. Also: bound, antithetic exactness, exactly uniform stratified `l`, batch independence. |
-| `test_objective_properties.py` | Advantage laws, length-invariant ratio, PPO clipping (finite-difference gradients), KL estimators (k1/k3 unbiasedness against an exact KL), loss gradients, exact micro-batch accumulation. |
-| `test_sampler_properties.py` | Transfer schedule, decoding-trace state machine (committed tokens fixed, blocks left to right), point-mass oracle, confidence ordering, tempered-softmax sampling (χ²). |
-| `test_rewards_properties.py`, `test_data_properties.py` | Reward oracles from constructed answers, safe arithmetic (no `eval`), boxed-answer round trips, unique-solution puzzles (brute force over all 288 grids), reachable countdown targets. |
-| `test_trainer_properties.py` | With lr = 0: ρ ≡ 1 and KL ≡ 0 over all µ iterations. Also: rollout cadence, the reference never moves, and reward rises on a toy task. |
-| `test_distributed.py` | DDP replicas stay bitwise identical with different data per rank. |
-| `test_hf_integration.py` | On a tiny LLaDA built from the official modeling code: adapter-off equals reference, left-padding invariance, LoRA trains only the adapter. |
+| `espo.micro_batch_size` | Lower it if you run out of GPU memory. Results are unchanged, because gradients are accumulated exactly. |
+| `train.resume_from=outputs/<config>/checkpoint-N` | Resume a run. |
+| `train.wandb_project=espo` | Log to Weights & Biases. |
+| `train.train_file=4x4_sudoku_unique_puzzles.csv` | Use the authors' Sudoku training set instead of generated puzzles. |
+| `train.countdown_source=synthetic` | Generate Countdown problems instead of downloading them. |
 
-## Contributing / fixing things
+The defaults follow the paper (Sec. 5.1, App. E) and the authors' run scripts:
+* LoRA with rank 128 and α 64 on LLaDA-8B-Instruct.
+* 96 answers per step: 16 prompts × 6 answers each. MATH uses 16 prompts × 16 answers.
+* 8 updates per batch of generated answers, and 2 random masks per ELBO estimate.
+* Learning rate 3e-6.
+* Answers of 256 tokens, generated in blocks of 32.
 
-Before changing code, read [`AGENTS.md`](AGENTS.md), whichever agent or person you are.
-`CLAUDE.md` imports it, and the pbt-skills it relies on are vendored in `.claude/skills/`.
-Changes go through the same property-first loop the code was built with:
-1. Update the spec in `PROPERTIES.md`.
-2. Write a failing property.
+Gradient checkpointing is on by default, so that a micro-batch fits on an 80 GB GPU.
+
+## How it works
+
+Each training round has two phases:
+1. **Generate.** Every GPU takes 2 prompts and samples 6 answers for each with the
+   diffusion sampler (`espo/sampler.py`).
+2. **Score and update.** Each answer is scored by a task reward (`espo/rewards.py`) and
+   compared with the other answers to the same prompt. That gives its *advantage*: better
+   than its siblings is positive, worse is negative. The model then takes 8 optimizer steps
+   on this batch (`espo/trainer.py`).
+
+The objective (`espo/objective.py`) is a PPO-style clipped surrogate, applied to the whole
+answer rather than to each token:
+
+| Piece | Definition | Paper |
+|---|---|---|
+| Answer log-likelihood | ELBO, estimated by masking a random number of tokens and scoring the model's predictions (`espo/elbo.py`) | Eq. 3, 32–34 |
+| Importance ratio | `ρ = exp((ELBO_new − ELBO_old) / L)`, where `L` is answer length; dividing by `L` keeps ρ near 1 | Eq. 8 |
+| Loss | `−min(ρ·A, clip(ρ, 1−ε, 1+ε)·A) + β·½(ELBO_new − ELBO_ref)² / L`, with ε = 0.2 (0 for Countdown) | Eq. 7, 10 |
+| Variance reduction | the old, new and reference models are scored on the same masks; each mask is paired with its complement | App. D |
+
+The reference model is the base model with the LoRA adapter switched off, so it costs no
+extra memory.
+
+## Testing
+
+```bash
+pytest                                  # ~1 min on CPU, no GPU needed
+HYPOTHESIS_PROFILE=thorough pytest      # 500 random cases per property instead of 40
+python scripts/mutation_test.py         # checks that the tests catch 22 deliberately injected bugs
+```
+
+The tests are *property-based*: each one states a rule that must hold for all inputs, and
+Hypothesis generates inputs that try to break it. The rules are written down in
+[`PROPERTIES.md`](PROPERTIES.md) and were written before the implementation. Examples:
+* On small problems where the exact log-likelihood can be computed by enumeration, the
+  ELBO estimator's average equals it.
+* With learning rate 0, the importance ratio is exactly 1 for all 8 updates. This catches
+  old and new likelihoods being scored on different masks.
+* Rewards match answers built to have a known score, and model output is never executed
+  as code.
+* GPU replicas stay bit-identical under DDP.
+
+The mutation script injects plausible bugs one at a time, such as a wrong weight, a flipped
+sign or a missing normalisation, and confirms the tests fail for each. It found two gaps in
+the original test suite; both are now covered (see `PROPERTIES.md`).
+
+## Contributing
+
+Read [`AGENTS.md`](AGENTS.md) first. It applies to people, Claude Code (through
+`CLAUDE.md`), Codex and other agents. The short version:
+1. Change the spec in `PROPERTIES.md`.
+2. Reproduce any bug as a failing test.
 3. Fix the code.
-4. Add a mutant to `scripts/mutation_test.py`.
+4. Add a matching injected bug to `scripts/mutation_test.py`.
 
-CI (`.github/workflows/properties.yml`) runs the properties and the mutation test on every push.
+Never weaken a test just to make it pass. The pbt-skills guides the process relies on are
+included in `.claude/skills/`. CI runs the tests and the mutation check on every push.
 
-## Deviations from the released code
+## Repository layout
 
-All are documented in `PROPERTIES.md`:
-* Stratified mask counts use integer offsets, so each sequence's `l` is exactly uniform.
-  The released `torch.round(linspace(...))` is biased when `(L+1)/B` ends in .5.
-* LoRA dropout is 0, so that ρ is exactly 1 on-policy.
-* `L_old` and `L_ref` are computed in the same module mode as the update.
-* Prompts are left-padded with an attention mask in both generation and ELBO evaluation.
-  The released code masks only during generation.
-* Coding tasks (AceCoder with a code-execution sandbox) are not included.
+```
+espo/           elbo.py, objective.py, sampler.py, trainer.py   core method
+                rewards.py, data.py, tasks.py                   tasks and rewards
+                model.py, train.py, evaluate.py                 LLaDA/Dream loading and CLIs
+                toy.py                                          tiny model for CPU tests
+configs/        one YAML per task
+scripts/        train / eval / smoke launchers, mutation_test.py
+tests/          property tests (each cites its ID from PROPERTIES.md)
+PROPERTIES.md   the specification
+AGENTS.md       how to change this code
+```
+
+## Differences from the authors' code
+
+Details and reasons are in `PROPERTIES.md`.
+* **Mask counts.** The number of masked tokens is drawn exactly uniformly. The authors' rounding skews it slightly for some batch sizes.
+* **LoRA dropout** is 0, so the ratio is exactly 1 before any update.
+* **Model mode.** Old and reference likelihoods are computed in the same mode as training (train vs. eval).
+* **Attention mask.** The padding mask is applied when scoring as well as when generating.
+* **Coding tasks** are not included (they need a code-execution sandbox).
