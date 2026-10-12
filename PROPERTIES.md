@@ -124,8 +124,8 @@ multiple of the number of blocks.
 
 | ID | Category | Property | Oracle | Catches |
 |----|----------|----------|--------|---------|
-| **T1** | stateful invariant | With learning rate 0, for every one of the `µ` inner iterations the ratio is exactly 1 and the clipped fraction is 0 (old ELBO and current ELBO use the same per-iteration masks). | Identity (θ never changes). | Mask/iteration bookkeeping bugs between rollout time and update time. |
-| **T2** | invariant | At step 0 (policy initialised from the reference) the KL estimate is exactly 0. | Identity. | Reference ≠ initial policy, ref computed on different masks. |
+| **T1** | stateful invariant | With learning rate 0, for every one of the `µ` inner iterations the ratio is 1 (within `1e-6`) and the clipped fraction is 0 (old ELBO and current ELBO use the same per-iteration masks). | Identity (θ never changes). | Mask/iteration bookkeeping bugs between rollout time and update time. |
+| **T2** | invariant | At step 0 (policy initialised from the reference) the KL estimate is 0 (within `1e-9`). | Identity. | Reference ≠ initial policy, ref computed on different masks. |
 | **T3** | stateful | Rollouts are regenerated exactly once every `µ` optimizer steps; optimizer steps = `num_steps`. | Counter model. | Re-using stale rollouts too long / regenerating too often. |
 | **T4** | integration (seeded) | On a toy task (reward = fraction of a target token) with a tiny bidirectional transformer, mean reward increases substantially after training. | Reward before vs after. | Sign errors that pass every unit property but ascend the wrong way. |
 | **T5** | invariant | Gradient flows only into trainable parameters; reference parameters are never updated. | Parameter snapshots. | Updating the reference / frozen base weights. |
@@ -189,6 +189,12 @@ wrapper), which the DDP replica-consistency property kills.
   mode, where PyTorch's transformer uses a different fused kernel than in `train()`
   mode. With dropout this would bias ρ. Old/ref ELBOs are now computed in the same mode
   as the update forward.
+* **T1/T2 tolerance.** These were first stated bit-exact. GitHub's CI runners produced
+  `KL = 9.5e-15`: the update forward runs with autograd, `L_old`/`L_ref` under `no_grad`,
+  and on some CPUs the two give last-bit-different results. Exactness across autograd modes
+  is not portable (and will not hold in bf16 on GPUs), so T1/T2 now use tolerances. Those are
+  still far below the order-1 differences produced by the mask bugs T1 targets; both
+  trainer mutants remain killed. (HF-T2 compares two `no_grad` forwards and stays bit-exact.)
 * **LoRA targets.** LLaDA's linear layers are `q_proj, k_proj, v_proj, attn_out,
   ff_proj, up_proj, ff_out`; the released config lists Llama names, so only
   `q/k/v/up_proj` were actually adapted there. We default to that effective set.

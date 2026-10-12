@@ -7,7 +7,7 @@ import math
 
 import pytest
 import torch
-from hypothesis import given, settings, strategies as st
+from hypothesis import example, given, settings, strategies as st
 
 from espo.toy import TinyDiffusionLM, ToyPolicy, ToyTask
 from espo.trainer import ESPOConfig, ESPOTrainer
@@ -29,22 +29,34 @@ def make_trainer(lr=0.0, mu=2, M=1, G=4, prompts=2, micro=3, beta=0.01, gen_leng
     return ESPOTrainer(policy, task, opt, cfg), policy
 
 
+# Tolerances: the update forward runs with autograd, L_old / L_ref under no_grad. On some
+# CPUs (GitHub's runners) the two modes give last-bit-different results (KL ~ 1e-14, seen
+# in CI), so bit-exactness is not portable. The bugs this property targets (old/current
+# ELBO on different masks or iterations) give |Delta L| of order 1, i.e. |rho - 1| ~ 1e-1.
+RATIO_TOL = 1e-6   # |rho - 1|        <=> |Delta L| <~ L * 1e-6
+KL_TOL = 1e-9      # 0.5 Delta^2 / L  <=> |Delta L| <~ 1e-4
+
+
 @settings(max_examples=8)
 @given(st.integers(1, 4), st.integers(1, 2), st.integers(1, 5), st.booleans(),
        st.integers(0, 1000))
-def test_T1_T2_zero_lr_keeps_ratio_exactly_one_and_kl_zero(mu, M, micro, coupled, seed):
-    """T1. With lr = 0, for every inner iteration the sequence ratio is exactly 1 and the
-    clip fraction is 0 (old and current ELBO use the same per-iteration masks).
-    T2. Since the policy starts at the reference, the KL estimate is exactly 0.
+@example(mu=1, M=1, micro=2, coupled=False, seed=0)  # CI counterexample to the bit-exact version
+def test_T1_T2_zero_lr_keeps_ratio_one_and_kl_zero(mu, M, micro, coupled, seed):
+    """T1. With lr = 0, for every inner iteration the sequence ratio is 1 (to float
+    tolerance) and the clip fraction is 0: old and current ELBO use the same
+    per-iteration masks.
+    T2. Since the policy starts at the reference, the KL estimate is 0 (to tolerance).
     Oracle: identity (theta never changes).
+    History: first stated bit-exact; CI showed KL = 9.5e-15 because grad / no-grad forwards
+    differ in the last bits on some CPUs, so the property now uses RATIO_TOL / KL_TOL.
     """
     trainer, _ = make_trainer(lr=0.0, mu=mu, M=M, micro=micro, coupled=coupled, seed=seed)
     logs = trainer.train(num_steps=2 * mu)
     assert len(logs) == 2 * mu
     for s in logs:
-        assert s["ratio_min"] == 1.0 and s["ratio_max"] == 1.0
+        assert abs(s["ratio_min"] - 1.0) <= RATIO_TOL and abs(s["ratio_max"] - 1.0) <= RATIO_TOL
         assert s["clip_frac"] == 0.0
-        assert s["kl"] == 0.0
+        assert 0.0 <= s["kl"] <= KL_TOL
 
 
 @settings(max_examples=6)
