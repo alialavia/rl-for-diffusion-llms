@@ -106,7 +106,9 @@ def load_model_and_tokenizer(args: ModelArgs, device, trainable: bool = True, ne
         tok.pad_token = tok.eos_token
 
     def load():
-        m = AutoModel.from_pretrained(args.model_name_or_path, trust_remote_code=True, torch_dtype=dtype)
+        # load straight onto this rank's device (avoids 8 full CPU copies on one node)
+        m = AutoModel.from_pretrained(args.model_name_or_path, trust_remote_code=True, torch_dtype=dtype,
+                                      low_cpu_mem_usage=True, device_map={"": str(device)})
         return m.to(device)
 
     model = load()

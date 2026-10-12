@@ -7,12 +7,15 @@ name = "espo"
 version = "0.1.0"
 description = "ESPO: ELBO-based Sequence-level Policy Optimization for diffusion LLMs (arXiv:2512.03759)"
 requires-python = ">=3.10"
+# Versions the test suite and the tiny-LLaDA DDP run were verified with. LLaDA / Dream
+# remote modeling code does not load under transformers 5.
 dependencies = [
   "torch>=2.4",
-  # LLaDA / Dream remote modeling code is written for transformers 4.x
-  "transformers>=4.46,<5",
-  "peft>=0.14",
-  "datasets>=2.20,<4",
+  "transformers==4.52.4",
+  "peft==0.17.0",
+  "datasets>=3.0,<4",
+  "huggingface_hub<1.0",
+  "accelerate>=1.0",
   "pyyaml",
 ]
 

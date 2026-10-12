@@ -81,7 +81,10 @@ def setup_distributed():
     backend = "nccl" if torch.cuda.is_available() else "gloo"
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend)
+    from datetime import timedelta
+
+    # long timeout: rank 0 downloads the model/datasets while the others wait at a barrier
+    dist.init_process_group(backend, timeout=timedelta(hours=2))
     device = torch.device("cuda", local_rank) if torch.cuda.is_available() else torch.device("cpu")
     return dist.get_rank(), dist.get_world_size(), local_rank, device
 

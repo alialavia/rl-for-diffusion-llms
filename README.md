@@ -74,6 +74,24 @@ Data:
 * GSM8K: `openai/gsm8k`.
 * MATH: `EleutherAI/hendrycks_math` for training, `HuggingFaceH4/MATH-500` for test.
 
+## Running on 8×H100: what is and isn't verified
+
+The code has **not** yet been run on GPUs or with the real 8B weights. What has been verified on CPU:
+* all properties in `PROPERTIES.md`;
+* the full `espo.train` CLI under `torchrun` with 2 DDP ranks, on a tiny randomly initialised LLaDA built from the official modeling code and tokenizer. This covers LoRA, the reference via disabled adapters, gradient checkpointing, the chat template, rewards and checkpoint save.
+
+Run the preflight first. It does 16 optimizer steps with the real model and the full batch, in about 10–20 minutes:
+
+```bash
+scripts/smoke_8xh100.sh sudoku_llada
+grep -o '"max_mem_gb": [0-9.]*' outputs/smoke_sudoku_llada/metrics.jsonl | tail -1
+```
+
+Things to check there:
+* **Peak memory.** This is estimated, not measured. If you OOM, lower `espo.micro_batch_size` (exact accumulation, property O10) or `espo.generation_batch_size`.
+* **Time.** Back-of-envelope: about 1–1.5 min per rollout phase (8 steps), so roughly a day for 10k steps. Generation dominates, as in the paper.
+* **Dream** (`sudoku_dream`) is experimental. Its attention-mask and logit-shift handling follow Dream's own generation code, but they have not been run.
+
 ## Evaluate
 
 ```bash

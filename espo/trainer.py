@@ -191,7 +191,10 @@ class ESPOTrainer:
         if self.scheduler is not None:
             self.scheduler.step()
         self.global_step += 1
-        return {"loss": agg["loss"], "kl": agg["kl_sum"] / N, "clip_frac": agg["clip_count"] / N,
+        mem = {}
+        if self.device.type == "cuda":
+            mem = {"max_mem_gb": torch.cuda.max_memory_allocated(self.device) / 2**30}
+        return {**mem, "loss": agg["loss"], "kl": agg["kl_sum"] / N, "clip_frac": agg["clip_count"] / N,
                 "ratio_min": agg["ratio_min"], "ratio_max": agg["ratio_max"],
                 "elbo_per_token": agg["elbo_sum"] / (N * L), "grad_norm": float(grad_norm)}
 
