@@ -121,6 +121,18 @@ python scripts/mutation_test.py          # every injected bug must be killed
 | `test_distributed.py` | DDP replicas stay bitwise identical with different data per rank. |
 | `test_hf_integration.py` | On a tiny LLaDA built from the official modeling code: adapter-off equals reference, left-padding invariance, LoRA trains only the adapter. |
 
+## Contributing / fixing things
+
+Before changing code, read [`AGENTS.md`](AGENTS.md), whichever agent or person you are.
+`CLAUDE.md` imports it, and the pbt-skills it relies on are vendored in `.claude/skills/`.
+Changes go through the same property-first loop the code was built with:
+1. Update the spec in `PROPERTIES.md`.
+2. Write a failing property.
+3. Fix the code.
+4. Add a mutant to `scripts/mutation_test.py`.
+
+CI (`.github/workflows/properties.yml`) runs the properties and the mutation test on every push.
+
 ## Deviations from the released code
 
 All are documented in `PROPERTIES.md`:
